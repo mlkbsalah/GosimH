@@ -85,6 +85,15 @@ type Alternatives = {
   search_links?: { leboncoin?: string; fnac?: string; amazon?: string };
 };
 
+/* Phase 2 output — refined human-readable diagnosis. The backend forwards
+   it inside the Phase 3 response under the `phase2` key for transparency. */
+type Phase2 = {
+  appliance?: string;
+  brand?: string;
+  year?: string;
+  diagnosis?: string;
+};
+
 type Diagnosis = {
   status?: string;
   appliance?: string;
@@ -96,16 +105,8 @@ type Diagnosis = {
     results?: RepairResults;
     alternatives?: Alternatives;
   };
+  phase2?: Phase2;
 };
-
-const QUICK_TYPES = [
-  "Washing machine",
-  "Dishwasher",
-  "Fridge",
-  "Oven",
-  "Microwave",
-  "Dryer",
-];
 
 const AGE_OPTIONS = [
   "< 2 years",
@@ -163,7 +164,6 @@ export default function DiagnosticApp() {
   const [screen, setScreen] = useState<Screen>("capture");
   const [photos, setPhotos] = useState<string[]>([]);
   const [text, setText] = useState("");
-  const [type, setType] = useState<string | null>(null);
   const [path, setPath] = useState<Path>("diy");
   const [thinkingStep, setThinkingStep] = useState(0);
 
@@ -182,7 +182,7 @@ export default function DiagnosticApp() {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const canSubmit = photos.length > 0 || text.trim().length > 0 || !!type;
+  const canSubmit = photos.length > 0 || text.trim().length > 0;
   const canDiagnose =
     location.trim().length > 0 && age !== null && budget !== null;
 
@@ -247,12 +247,9 @@ export default function DiagnosticApp() {
         setIdentification(ident);
 
         // 2) Diagnose — let the backend chain Phase 2 (refine) → Phase 3
-        // (triage + agent). We pass the raw Phase 1 output and the user's
-        // context; the backend builds the Phase 2 input itself so we don't
-        // bypass the diagnosis-refinement step.
+        // (triage + agent). Only fields the user actually entered are sent.
         const payload = {
           identification: ident,                              // Phase 1 dict or null
-          appliance_hint: type ?? "",                         // chip selection
           free_text: text.trim(),                             // user's description
           age: AGE_TO_YEAR[age ?? ""] || null,                // year string or null
           tools: tools.map((t) => t.toLowerCase()),
@@ -308,7 +305,6 @@ export default function DiagnosticApp() {
     setScreen("capture");
     setPhotos([]);
     setText("");
-    setType(null);
     setLocation("");
     setAge(null);
     setBudget(null);
@@ -332,7 +328,6 @@ export default function DiagnosticApp() {
           <CaptureScreen
             photos={photos}
             text={text}
-            type={type}
             canSubmit={canSubmit}
             fileInputRef={fileInputRef}
             onFiles={handleFiles}
@@ -340,7 +335,6 @@ export default function DiagnosticApp() {
               setPhotos((prev) => prev.filter((_, idx) => idx !== i))
             }
             onText={setText}
-            onType={setType}
             onSubmit={() => setScreen("details")}
           />
         )}
@@ -386,24 +380,20 @@ export default function DiagnosticApp() {
 function CaptureScreen({
   photos,
   text,
-  type,
   canSubmit,
   fileInputRef,
   onFiles,
   onRemovePhoto,
   onText,
-  onType,
   onSubmit,
 }: {
   photos: string[];
   text: string;
-  type: string | null;
   canSubmit: boolean;
   fileInputRef: React.RefObject<HTMLInputElement | null>;
   onFiles: (f: FileList | null) => void;
   onRemovePhoto: (i: number) => void;
   onText: (t: string) => void;
-  onType: (t: string | null) => void;
   onSubmit: () => void;
 }) {
   return (
@@ -479,33 +469,8 @@ function CaptureScreen({
           />
         </div>
 
-        {/* Quick type chips */}
-        <div className="mt-7">
-          <h2 className="font-sans text-[10px] uppercase tracking-[0.16em] text-ash">
-            What is it?
-          </h2>
-          <div className="no-scrollbar mt-2.5 flex gap-2 overflow-x-auto pb-1">
-            {QUICK_TYPES.map((t) => {
-              const active = type === t;
-              return (
-                <button
-                  key={t}
-                  type="button"
-                  onClick={() => onType(active ? null : t)}
-                  className={`shrink-0 rounded-full border px-3.5 py-1.5 font-sans text-[13px] font-medium transition ${
-                    active
-                      ? "border-ink bg-ink text-bone"
-                      : "border-ink/15 bg-bone text-ink/75 hover:border-ink/30"
-                  }`}
-                >
-                  {t}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* Free-form text */}
+        {/* Free-form description — Slaï uses this both as a hint for vision
+            identification and as input for the Phase 2 diagnosis agent. */}
         <div className="mt-7">
           <h2 className="font-sans text-[10px] uppercase tracking-[0.16em] text-ash">
             What&apos;s wrong?
@@ -824,10 +789,11 @@ function ResultScreen({
 
   const cost = triage?.estimated_repair_cost;
   const newPrice = triage?.estimated_new_price;
-  const reasoning = triage?.reason || config.reasoning;
-  const rootCause =
-    identification?.visible_symptoms?.[0] ||
-    "based on what you described";
+  // Phase 2's refined diagnosis is the most useful explanation — it's what
+  // the agent figured out from the symptoms. Triage's reason explains the
+  // *decision* (why DIY vs pro vs replace).
+  const phase2Diagnosis = diagnosis?.phase2?.diagnosis;
+  const triageReason = triage?.reason;
   const confidence = identification?.confidence;
 
   // Bottom CTA — adapts to what each agent actually returned.
@@ -873,15 +839,35 @@ function ResultScreen({
           </div>
         </div>
 
-        {/* Slaï's reasoning */}
-        <div className="mt-5 flex gap-2.5">
-          <SlaiAvatar className="mt-0.5 h-8 w-8 shrink-0" />
-          <div className="max-w-[88%] rounded-2xl rounded-bl-sm border border-ink/10 bg-bone px-4 py-3">
-            <p className="text-[14px] leading-relaxed text-ink/85">
-              <span className="font-medium">{rootCause}</span> — {reasoning}
-            </p>
+        {/* Slaï's diagnosis — the Phase 2 output, the actual "what's broken". */}
+        {phase2Diagnosis && (
+          <div className="mt-5 flex gap-2.5">
+            <SlaiAvatar className="mt-0.5 h-8 w-8 shrink-0" />
+            <div className="max-w-[88%] rounded-2xl rounded-bl-sm border border-goldseam/30 bg-goldseam/5 px-4 py-3">
+              <p className="font-sans text-[10px] uppercase tracking-[0.16em] text-goldseam">
+                Diagnosis
+              </p>
+              <p className="mt-1.5 text-[14px] leading-relaxed text-ink/85">
+                {phase2Diagnosis}
+              </p>
+            </div>
           </div>
-        </div>
+        )}
+
+        {/* Triage rationale — why this path (DIY / pro / replace). */}
+        {triageReason && (
+          <div className="mt-3 flex gap-2.5">
+            <SlaiAvatar className="mt-0.5 h-8 w-8 shrink-0 opacity-60" />
+            <div className="max-w-[88%] rounded-2xl rounded-bl-sm border border-ink/10 bg-bone px-4 py-3">
+              <p className="font-sans text-[10px] uppercase tracking-[0.16em] text-ash">
+                Why I&apos;m saying this
+              </p>
+              <p className="mt-1.5 text-[14px] leading-relaxed text-ink/75">
+                {triageReason}
+              </p>
+            </div>
+          </div>
+        )}
 
         {/* Path-specific content */}
         <div className="mt-6">
@@ -1543,12 +1529,16 @@ function SectionHeading({
 /*  Path config                                                                */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * Path-specific styling and copy for the verdict card. Title/subtitle are
+ * generic framings; the actual reasoning shown to the user comes from
+ * Phase 2 (`diagnosis`) and Phase 3 (`triage.reason`).
+ */
 const PATH_CONFIG: Record<
   Path,
   {
     title: string;
     subtitle: string;
-    reasoning: string;
     cta: string;
     cardClass: string;
     ctaClass: string;
@@ -1556,30 +1546,21 @@ const PATH_CONFIG: Record<
 > = {
   diy: {
     title: "You can fix this yourself.",
-    subtitle:
-      "Honestly — it's a 30-minute job with what you already have at home.",
-    reasoning:
-      "It's a known fault, the part is cheap, and you have the tools. Skip the call-out fee.",
+    subtitle: "It's repairable with the tools and parts you have access to.",
     cta: "Start the repair",
     cardClass: "border-sage/30 bg-sage/10 text-ink",
     ctaClass: "bg-ink text-bone hover:bg-ink/85",
   },
   pro: {
     title: "Best to call a pro.",
-    subtitle:
-      "It needs hands-on testing and a tool you probably don't own.",
-    reasoning:
-      "Don't risk a water or electrical issue. A repairer will diagnose and fix in one visit.",
+    subtitle: "It needs hands-on testing or a tool you probably don't own.",
     cta: "Find a repairer",
     cardClass: "border-goldseam/30 bg-goldseam/15 text-ink",
     ctaClass: "bg-ink text-bone hover:bg-ink/85",
   },
   replace: {
     title: "Replace it — honestly.",
-    subtitle:
-      "Repair would cost more than half the price of a refurbished one.",
-    reasoning:
-      "It's at the end of its design life. Replacing now is cheaper, and a refurbished unit saves materials.",
+    subtitle: "Repair isn't worth it given the age, cost, and condition.",
     cta: "See alternatives",
     cardClass: "border-ink/15 bg-ink/[0.06] text-ink",
     ctaClass: "bg-goldseam text-ink hover:bg-goldseam/90",

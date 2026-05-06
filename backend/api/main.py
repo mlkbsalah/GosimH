@@ -147,10 +147,9 @@ class DiagnoseRequest(BaseModel):
 
     `identification` is the Phase 1 output (from /api/identify) when photos
     were uploaded. When absent, we synthesise a minimal Phase-1-shaped dict
-    from `appliance_hint` + `free_text` so Phase 2 can still run.
+    from `free_text` so Phase 2 can still infer the appliance type.
     """
     identification: Optional[dict[str, Any]] = None
-    appliance_hint: str = ""
     free_text: str = ""
     age: Optional[str] = None
     tools: list[str] = Field(default_factory=list)
@@ -173,8 +172,10 @@ def diagnose(req: DiagnoseRequest) -> dict[str, Any]:
         if req.free_text.strip():
             phase1.setdefault("visible_symptoms", []).append(req.free_text.strip())
     else:
+        # No photos were uploaded — Phase 2 will infer the appliance type
+        # from the user's free-text description.
         phase1 = {
-            "type": (req.appliance_hint or "other").lower().replace(" ", "_"),
+            "type": "other",
             "brand": None,
             "model": None,
             "serial": None,
