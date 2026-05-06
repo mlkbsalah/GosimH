@@ -1,0 +1,103 @@
+@import "tailwindcss";
+
+:root {
+  /* Brand palette — secondlife identity */
+  --color-bone: #efe9dc;
+  --color-ink: #1a1814;
+  --color-goldseam: #c9914b;
+  --color-ash: #a8a39a;
+  --color-sage: #6b7864;
+}
+
+@theme inline {
+  --color-bone: var(--color-bone);
+  --color-ink: var(--color-ink);
+  --color-goldseam: var(--color-goldseam);
+  --color-ash: var(--color-ash);
+  --color-sage: var(--color-sage);
+
+  --color-background: var(--color-bone);
+  --color-foreground: var(--color-ink);
+
+  --font-sans: var(--font-inter), system-ui, -apple-system, sans-serif;
+  --font-serif: var(--font-fraunces), Georgia, serif;
+}
+
+html,
+body {
+  background: var(--color-bone);
+  color: var(--color-ink);
+}
+
+body {
+  font-family: var(--font-sans);
+  font-feature-settings: "ss01", "cv11";
+}
+
+::selection {
+  background: var(--color-goldseam);
+  color: var(--color-bone);
+}
+
+/* The animated kintsugi seam used in the wordmark */
+@keyframes seam-draw {
+  from {
+    stroke-dashoffset: 200;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+.seam-animate {
+  stroke-dasharray: 200;
+  stroke-dashoffset: 200;
+  animation: seam-draw 1.4s 0.3s ease-out forwards;
+}
+
+/* Slaï thinking — the two gold dots pulse like an attentive gaze */
+@keyframes seam-pulse {
+  0%,
+  100% {
+    opacity: 0.3;
+    transform: scale(0.85);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.15);
+  }
+}
+
+.dot-pulse-a {
+  animation: seam-pulse 1.2s ease-in-out infinite;
+}
+
+.dot-pulse-b {
+  animation: seam-pulse 1.2s ease-in-out infinite;
+  animation-delay: 0.25s;
+}
+
+/* Screen transition entry */
+@keyframes screen-enter {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.screen-enter {
+  animation: screen-enter 0.32s ease-out both;
+}
+
+/* Hide scrollbar on chips row */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
