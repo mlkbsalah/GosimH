@@ -130,7 +130,7 @@ async def identify(
         except Exception as exc:  # the LLM call can fail in many ways
             return {"ok": False, "error": str(exc)}
 
-    follow_up = oi.next_step(result, len(photos))
+    follow_up = oi.needs_more(result, len(photos))
     return {
         "ok": True,
         "result": result,
