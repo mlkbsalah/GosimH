@@ -55,7 +55,7 @@ def identify(photo_paths, hints=None):
         text += "\n\nUser context:\n" + "\n".join(f"- {h}" for h in hints)
 
     image_blocks = [
-        {"type": "image_url", "image_url": {"url": encode(p)}} for p in photo_paths
+        {"type": "image_url", "image_url": {"url": encode_image(p)}} for p in photo_paths
     ]
 
     content = [{"type": "text", "text": text}, *image_blocks]
@@ -71,6 +71,28 @@ def identify(photo_paths, hints=None):
     return _parse_json(resp.choices[0].message.content)
 
 
+REQUIRED_FIELDS = {"type", "brand", "confidence"}
+CONFIDENCE_THRESHOLD = 0.5
+
+def identify_batch(photo_paths):
+    """One-shot identification from a set of photos. Returns the result dict on
+    success (confident type + brand), or None if identification failed."""
+    if not photo_paths:
+        return None
+    try:
+        result = identify(photo_paths[:MAX_PHOTOS])
+    except Exception:
+        return None
+    if (
+        result.get("type") not in (None, "other")
+        and (result.get("confidence") or 0) >= CONFIDENCE_THRESHOLD
+        and result.get("brand")
+    ):
+        log_turn(photo_paths, [], result)
+        return result
+    return None
+
+
 def next_step(result, n_photos):
     if "error" in result:
         return "Something went wrong on the last call. Try another photo or type 'skip'."
@@ -83,3 +105,81 @@ def next_step(result, n_photos):
         return ("Photograph the rating plate (sticker on the door edge, side, or back). "
                 "Type 'skip' if you can't find it.")
     return None
+
+
+def _format_result(result):
+    if "error" in result:
+        return f"Something went wrong: {result['error']}"
+
+    lines = []
+    kind = result.get("type", "unknown").replace("_", " ")
+    brand = result.get("brand") or "unknown brand"
+    model = result.get("model")
+    serial = result.get("serial")
+    error_code = result.get("error_code")
+    symptoms = result.get("visible_symptoms") or []
+    confidence = result.get("confidence", 0)
+
+    lines.append(f"I see a {brand} {kind}" + (f", model {model}" if model else "") + ".")
+    if serial:
+        lines.append(f"Serial number: {serial}")
+    if error_code:
+        lines.append(f"Error code on display: {error_code}")
+    if symptoms:
+        lines.append("Visible issues: " + ", ".join(symptoms) + ".")
+    lines.append(f"(Confidence: {int(confidence * 100)}%)")
+    return " ".join(lines)
+
+
+def main():
+    photo_paths = []
+    hints = []
+    result = None
+
+    print("Appliance identifier — send a photo path to get started, or 'quit' to exit.")
+
+    while True:
+        try:
+            user_input = input("\nYou: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nGoodbye.")
+            break
+
+        if not user_input or user_input.lower() in ("quit", "exit"):
+            print("Goodbye.")
+            break
+
+        if os.path.isfile(user_input):
+            if len(photo_paths) >= MAX_PHOTOS:
+                print(f"Assistant: Maximum of {MAX_PHOTOS} photos reached.")
+                continue
+            photo_paths.append(user_input)
+            print(f"Assistant: Got it, analyzing {len(photo_paths)} photo(s)...")
+            try:
+                result = identify(photo_paths, hints or None)
+            except Exception as e:
+                result = {"error": str(e)}
+            log_turn(photo_paths, hints, result)
+            print(f"Assistant: {_format_result(result)}")
+            follow_up = next_step(result, len(photo_paths))
+            if follow_up:
+                print(f"Assistant: {follow_up}")
+        else:
+            if not photo_paths:
+                print("Assistant: Please send a photo path first.")
+                continue
+            hints.append(user_input)
+            print(f"Assistant: Thanks, re-analyzing with your note...")
+            try:
+                result = identify(photo_paths, hints)
+            except Exception as e:
+                result = {"error": str(e)}
+            log_turn(photo_paths, hints, result)
+            print(f"Assistant: {_format_result(result)}")
+            follow_up = next_step(result, len(photo_paths))
+            if follow_up:
+                print(f"Assistant: {follow_up}")
+
+
+if __name__ == "__main__":
+    main()
