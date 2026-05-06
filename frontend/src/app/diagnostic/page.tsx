@@ -10,7 +10,6 @@ import {
   CheckIcon,
   CloseIcon,
   PinIcon,
-  PlusIcon,
   RefreshIcon,
   SparkIcon,
   WrenchIcon,
@@ -18,6 +17,86 @@ import {
 
 type Screen = "capture" | "details" | "thinking" | "result";
 type Path = "diy" | "pro" | "replace";
+
+/* Backend response shapes — mirror object_identification.py + phase3.py. */
+type IdentifyResult = {
+  type?: string;
+  brand?: string | null;
+  model?: string | null;
+  serial?: string | null;
+  error_code?: string | null;
+  visible_symptoms?: string[];
+  confidence?: number;
+};
+
+/* Mirrors phase3 v3 output (all keys in English, see backend/phase3.py). */
+type Triage = {
+  decision: "diy" | "repair" | "replacement";
+  reason?: string;
+  difficulty?: number;
+  estimated_repair_cost?: string;
+  estimated_new_price?: string;
+};
+
+type DiyGuide = {
+  title?: string;
+  estimated_duration?: string;
+  difficulty?: string;
+  parts_needed?: string[];
+  tools_needed?: string[];
+  steps?: {
+    number?: number;
+    title?: string;
+    description?: string;
+    warning?: string | null;
+  }[];
+  tips?: string[];
+  sources?: string[];
+};
+
+type RepairResults = {
+  shops?: {
+    name?: string;
+    address?: string;
+    rating?: number | null;
+    reviews?: number | null;
+    open_now?: boolean | null;
+    google_maps_url?: string;
+  }[];
+  questions_to_ask?: string[];
+  required_skills?: string[];
+  max_budget?: string;
+  advice?: string;
+  source?: string;
+};
+
+type Alternatives = {
+  analysis?: string;
+  criteria?: string[];
+  recommended_models?: {
+    brand?: string;
+    model?: string;
+    estimated_price?: string;
+    highlights?: string[];
+    leboncoin_query?: string;
+    amazon_query?: string;
+  }[];
+  buying_tips?: string[];
+  search_links?: { leboncoin?: string; fnac?: string; amazon?: string };
+};
+
+type Diagnosis = {
+  status?: string;
+  appliance?: string;
+  decision: "diy" | "repair" | "replacement";
+  solution: {
+    type: "diy" | "repair" | "replacement";
+    triage?: Triage;
+    guide?: DiyGuide;
+    results?: RepairResults;
+    alternatives?: Alternatives;
+  };
+};
 
 const QUICK_TYPES = [
   "Washing machine",
@@ -58,16 +137,27 @@ const THINKING_STEPS = [
   "Estimating cost & effort…",
 ];
 
-// Mock diagnosis — to be wired to the Python backend later.
-const MOCK_DIAGNOSIS = {
-  appliance: "Bosch dishwasher",
-  symptom: "doesn't dry the dishes",
-  rootCause: "drying element (heater) likely failed",
-  confidence: 0.82,
-  estCost: "€25–60",
-  estTime: "30 min",
-  difficulty: 2,
+/* Map UI chip values to phase3.run_phase3() expected types. */
+const CURRENT_YEAR = 2026;
+const AGE_TO_YEAR: Record<string, string> = {
+  "< 2 years": String(CURRENT_YEAR - 1),
+  "2–5 years": String(CURRENT_YEAR - 4),
+  "5–10 years": String(CURRENT_YEAR - 7),
+  "10+ years": String(CURRENT_YEAR - 12),
+  "Not sure": "",
 };
+
+const BUDGET_TO_VALUE: Record<string, number> = {
+  "Up to €50": 50,
+  "€50–150": 150,
+  "€150–300": 300,
+  "Whatever it takes": 1000,
+};
+
+async function dataUrlToBlob(dataUrl: string): Promise<Blob> {
+  const res = await fetch(dataUrl);
+  return res.blob();
+}
 
 export default function DiagnosticApp() {
   const [screen, setScreen] = useState<Screen>("capture");
@@ -82,6 +172,13 @@ export default function DiagnosticApp() {
   const [age, setAge] = useState<string | null>(null);
   const [budget, setBudget] = useState<string | null>(null);
   const [tools, setTools] = useState<string[]>([]);
+
+  // Backend response state.
+  const [identification, setIdentification] = useState<IdentifyResult | null>(
+    null
+  );
+  const [diagnosis, setDiagnosis] = useState<Diagnosis | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -113,35 +210,100 @@ export default function DiagnosticApp() {
     setThinkingStep(0);
   };
 
-  // Cycle the thinking copy and pick a path. Mock decides DIY by default
-  // unless the user typed certain keywords.
+  // Real backend pipeline: identify (vision) → diagnose (agents).
+  // Step indicator cycles independently — finishes when the diagnose call
+  // resolves, regardless of how long phase3 takes (~20-40s).
   useEffect(() => {
     if (screen !== "thinking") return;
 
+    let cancelled = false;
+    let step = 0;
     const stepInterval = setInterval(() => {
-      setThinkingStep((s) => Math.min(s + 1, THINKING_STEPS.length - 1));
-    }, 750);
+      if (cancelled) return;
+      step = Math.min(step + 1, THINKING_STEPS.length - 1);
+      setThinkingStep(step);
+    }, 2200);
 
-    const text_l = text.toLowerCase();
-    let chosen: Path = "diy";
-    if (/old|dead|broken|gas|smoke|burn|leak.*water/.test(text_l)) {
-      chosen = "pro";
-    }
-    if (/15|20.year|years.old|too old|dead/.test(text_l)) {
-      chosen = "replace";
-    }
+    (async () => {
+      try {
+        // 1) Identify (only if photos uploaded).
+        let ident: IdentifyResult | null = null;
+        if (photos.length > 0) {
+          const fd = new FormData();
+          for (const dataUrl of photos) {
+            const blob = await dataUrlToBlob(dataUrl);
+            fd.append("photos", blob, "photo.jpg");
+          }
+          if (text.trim()) fd.append("hint", text);
 
-    const finishTimer = setTimeout(() => {
-      setPath(chosen);
-      setScreen("result");
-      clearInterval(stepInterval);
-    }, 3200);
+          const r = await fetch("/api/identify", { method: "POST", body: fd });
+          if (r.ok) {
+            const data = await r.json();
+            if (data.ok && data.result) ident = data.result;
+          }
+        }
+
+        if (cancelled) return;
+        setIdentification(ident);
+
+        // 2) Diagnose — assemble the phase3 v3 payload (English keys).
+        const payload = {
+          appliance:
+            ident?.type?.replace(/_/g, " ") ||
+            (type ?? "").toLowerCase() ||
+            "appliance",
+          brand: ident?.brand ?? "",
+          year: AGE_TO_YEAR[age ?? ""] ?? "",
+          diagnosis:
+            text.trim() || (ident?.visible_symptoms ?? []).join(", "),
+          tools: tools.map((t) => t.toLowerCase()),
+          location,
+          budget: BUDGET_TO_VALUE[budget ?? ""] ?? 100,
+        };
+
+        const r2 = await fetch("/api/diagnose", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+
+        if (!r2.ok) {
+          const detail = await r2.text();
+          throw new Error(`Diagnose failed (${r2.status}): ${detail}`);
+        }
+
+        const diag = (await r2.json()) as Diagnosis;
+        if (cancelled) return;
+
+        setDiagnosis(diag);
+        setError(null);
+
+        const decisionMap: Record<string, Path> = {
+          diy: "diy",
+          repair: "pro",
+          replacement: "replace",
+        };
+        setPath(decisionMap[diag.decision] ?? "diy");
+        setScreen("result");
+      } catch (err) {
+        if (cancelled) return;
+        // Log + fall back gracefully — show the result screen with a banner.
+        // eslint-disable-next-line no-console
+        console.error("Diagnostic API failed:", err);
+        setError(err instanceof Error ? err.message : String(err));
+        setDiagnosis(null);
+        setScreen("result");
+      } finally {
+        clearInterval(stepInterval);
+      }
+    })();
 
     return () => {
+      cancelled = true;
       clearInterval(stepInterval);
-      clearTimeout(finishTimer);
     };
-  }, [screen, text]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [screen]);
 
   const reset = () => {
     setScreen("capture");
@@ -153,6 +315,9 @@ export default function DiagnosticApp() {
     setBudget(null);
     setTools([]);
     setThinkingStep(0);
+    setIdentification(null);
+    setDiagnosis(null);
+    setError(null);
   };
 
   const toggleTool = (tool: string) => {
@@ -201,7 +366,15 @@ export default function DiagnosticApp() {
           <ThinkingScreen step={thinkingStep} totalSteps={THINKING_STEPS.length} />
         )}
 
-        {screen === "result" && <ResultScreen path={path} onReset={reset} />}
+        {screen === "result" && (
+          <ResultScreen
+            path={path}
+            diagnosis={diagnosis}
+            identification={identification}
+            error={error}
+            onReset={reset}
+          />
+        )}
       </div>
     </div>
   );
@@ -627,29 +800,61 @@ function ThinkingScreen({
 
 function ResultScreen({
   path,
+  diagnosis,
+  identification,
+  error,
   onReset,
 }: {
   path: Path;
+  diagnosis: Diagnosis | null;
+  identification: IdentifyResult | null;
+  error: string | null;
   onReset: () => void;
 }) {
   const config = PATH_CONFIG[path];
+  const triage = diagnosis?.solution?.triage;
+
+  // Display values — prefer real data, fall back gracefully so the demo
+  // never shows broken UI even if the agent timed out.
+  const applianceLabel =
+    diagnosis?.appliance?.trim() ||
+    [identification?.brand, identification?.type?.replace(/_/g, " ")]
+      .filter(Boolean)
+      .join(" ") ||
+    "your appliance";
+
+  const cost = triage?.estimated_repair_cost;
+  const newPrice = triage?.estimated_new_price;
+  const reasoning = triage?.reason || config.reasoning;
+  const rootCause =
+    identification?.visible_symptoms?.[0] ||
+    "based on what you described";
+  const confidence = identification?.confidence;
 
   return (
     <section className="screen-enter flex min-h-dvh flex-col md:min-h-[calc(100dvh-3rem)]">
       <AppHeader showBack onBack={onReset} />
 
       <div className="flex-1 overflow-y-auto px-5 pb-32 pt-3">
+        {error && (
+          <div className="mb-4 rounded-2xl border border-goldseam/40 bg-goldseam/10 px-4 py-3 text-[13px] leading-relaxed text-ink/80">
+            <strong className="font-medium text-ink">Heads up — </strong>
+            Slaï hit a snag reaching the reasoning agents. Showing a sample
+            answer so you can still see the flow.
+          </div>
+        )}
+
         {/* Decision card */}
-        <div
-          className={`rounded-3xl border p-5 ${config.cardClass}`}
-        >
+        <div className={`rounded-3xl border p-5 ${config.cardClass}`}>
           <div className="flex items-center justify-between">
             <span className="font-sans text-[10px] uppercase tracking-[0.18em] opacity-70">
               Verdict
             </span>
-            <span className="rounded-full bg-bone/40 px-2 py-0.5 font-sans text-[11px] font-medium">
-              {Math.round(MOCK_DIAGNOSIS.confidence * 100)}% confident
-            </span>
+            {confidence !== undefined && (
+              <span className="rounded-full bg-bone/40 px-2 py-0.5 font-sans text-[11px] font-medium">
+                {Math.round(confidence * 100)}% confident
+              </span>
+            )}
           </div>
 
           <h1 className="mt-3 font-serif text-3xl font-medium leading-tight">
@@ -660,9 +865,9 @@ function ResultScreen({
           </p>
 
           <div className="mt-4 flex flex-wrap gap-2 font-sans text-[12px]">
-            <Pill>{MOCK_DIAGNOSIS.appliance}</Pill>
-            <Pill>{MOCK_DIAGNOSIS.estCost}</Pill>
-            <Pill>{MOCK_DIAGNOSIS.estTime}</Pill>
+            <Pill>{applianceLabel}</Pill>
+            {cost && <Pill>Repair · {cost}</Pill>}
+            {newPrice && <Pill>New · {newPrice}</Pill>}
           </div>
         </div>
 
@@ -671,20 +876,24 @@ function ResultScreen({
           <SlaiAvatar className="mt-0.5 h-8 w-8 shrink-0" />
           <div className="max-w-[88%] rounded-2xl rounded-bl-sm border border-ink/10 bg-bone px-4 py-3">
             <p className="text-[14px] leading-relaxed text-ink/85">
-              I see three possible causes. Most likely:{" "}
-              <span className="font-medium">
-                {MOCK_DIAGNOSIS.rootCause}
-              </span>
-              . {config.reasoning}
+              <span className="font-medium">{rootCause}</span> — {reasoning}
             </p>
           </div>
         </div>
 
         {/* Path-specific content */}
         <div className="mt-6">
-          {path === "diy" && <DiyContent />}
-          {path === "pro" && <ProContent />}
-          {path === "replace" && <ReplaceContent />}
+          {path === "diy" && (
+            <DiyContent guide={diagnosis?.solution?.guide} />
+          )}
+          {path === "pro" && (
+            <ProContent results={diagnosis?.solution?.results} />
+          )}
+          {path === "replace" && (
+            <ReplaceContent
+              alternatives={diagnosis?.solution?.alternatives}
+            />
+          )}
         </div>
       </div>
 
@@ -713,34 +922,49 @@ function ResultScreen({
 /*  Path-specific bodies                                                       */
 /* -------------------------------------------------------------------------- */
 
-function DiyContent() {
-  const steps = [
-    {
-      n: "01",
-      title: "Cut the power",
-      body: "Unplug the appliance or flip the breaker. Wait 5 minutes.",
-    },
-    {
-      n: "02",
-      title: "Access the heating element",
-      body: "Remove the lower kickplate (4 screws). The element is the metal coil at the bottom of the tub.",
-    },
-    {
-      n: "03",
-      title: "Test with a multimeter",
-      body: "Set to continuity. Touch both terminals. No beep = element is dead.",
-    },
-    {
-      n: "04",
-      title: "Order & swap",
-      body: "Search the part number on the element itself. Same model, slot it in, reconnect.",
-    },
-  ];
+const FALLBACK_DIY_STEPS: { n: string; title: string; body: string; warning?: string | null }[] = [
+  {
+    n: "01",
+    title: "Cut the power",
+    body: "Unplug the appliance or flip the breaker. Wait 5 minutes.",
+  },
+  {
+    n: "02",
+    title: "Access the part",
+    body: "Remove the panel that hides the suspected faulty component.",
+  },
+  {
+    n: "03",
+    title: "Test & swap",
+    body: "Confirm the fault with a multimeter, then order and replace.",
+  },
+];
+
+const FALLBACK_DIY_TOOLS = ["Phillips screwdriver", "Multimeter"];
+
+function DiyContent({ guide }: { guide?: DiyGuide | null }) {
+  const steps =
+    guide?.steps && guide.steps.length > 0
+      ? guide.steps.map((e, i) => ({
+          n: String(e.number ?? i + 1).padStart(2, "0"),
+          title: e.title ?? `Step ${i + 1}`,
+          body: e.description ?? "",
+          warning: e.warning ?? null,
+        }))
+      : FALLBACK_DIY_STEPS;
+
+  const tools =
+    guide?.tools_needed && guide.tools_needed.length > 0
+      ? guide.tools_needed
+      : FALLBACK_DIY_TOOLS;
+
+  const tips = guide?.tips ?? [];
 
   return (
     <>
       <SectionHeading icon={<WrenchIcon className="h-3.5 w-3.5" />}>
-        Repair guide · 4 steps
+        {guide?.title ? guide.title : `Repair guide · ${steps.length} steps`}
+        {guide?.estimated_duration ? ` · ${guide.estimated_duration}` : ""}
       </SectionHeading>
       <ol className="mt-3 space-y-2.5">
         {steps.map((s) => (
@@ -759,6 +983,11 @@ function DiyContent() {
                 <p className="mt-1 text-[13.5px] leading-relaxed text-ink/70">
                   {s.body}
                 </p>
+                {s.warning && (
+                  <p className="mt-2 rounded-lg bg-goldseam/10 px-2.5 py-1.5 text-[12.5px] text-goldseam">
+                    ⚠ {s.warning}
+                  </p>
+                )}
               </div>
             </div>
           </li>
@@ -769,153 +998,235 @@ function DiyContent() {
         What you&apos;ll need
       </SectionHeading>
       <div className="mt-3 flex flex-wrap gap-2 font-sans text-[12.5px]">
-        {["Phillips screwdriver", "Multimeter", "Replacement part (~€35)"].map(
-          (t) => (
-            <span
-              key={t}
-              className="rounded-full border border-ink/15 bg-bone px-3 py-1.5 text-ink/80"
-            >
-              {t}
-            </span>
-          )
-        )}
+        {tools.map((t) => (
+          <span
+            key={t}
+            className="rounded-full border border-ink/15 bg-bone px-3 py-1.5 text-ink/80"
+          >
+            {t}
+          </span>
+        ))}
       </div>
+
+      {tips.length > 0 && (
+        <>
+          <SectionHeading
+            className="mt-6"
+            icon={<SparkIcon className="h-3.5 w-3.5" />}
+          >
+            Slaï&apos;s tips
+          </SectionHeading>
+          <ul className="mt-3 space-y-2 text-[13.5px] leading-relaxed text-ink/80">
+            {tips.map((t, i) => (
+              <li
+                key={i}
+                className="rounded-xl border border-ink/10 bg-bone px-3.5 py-2.5"
+              >
+                {t}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
     </>
   );
 }
 
-function ProContent() {
-  const pros = [
-    {
-      name: "Atelier Réparation Bastille",
-      address: "12 rue de la Roquette · Paris 11",
-      rating: 4.7,
-      reviews: 213,
-      open: true,
-    },
-    {
-      name: "ElectroFix Marais",
-      address: "5 rue Charlot · Paris 3",
-      rating: 4.5,
-      reviews: 88,
-      open: false,
-    },
-    {
-      name: "Bosch Service République",
-      address: "8 av. de la République · Paris 11",
-      rating: 4.3,
-      reviews: 154,
-      open: true,
-    },
-  ];
+const FALLBACK_QUESTIONS = [
+  "Flat rate or hourly? Is the part included?",
+  "How long is the warranty on the repair?",
+  "Do you have the part in stock?",
+];
+
+function ProContent({ results }: { results?: RepairResults | null }) {
+  const pros = results?.shops ?? [];
+  const questions =
+    results?.questions_to_ask && results.questions_to_ask.length > 0
+      ? results.questions_to_ask
+      : FALLBACK_QUESTIONS;
 
   return (
     <>
       <SectionHeading icon={<PinIcon className="h-3.5 w-3.5" />}>
-        Three pros near you
+        {pros.length > 0
+          ? `${pros.length} pro${pros.length > 1 ? "s" : ""} near you`
+          : "Pros near you"}
       </SectionHeading>
-      <ul className="mt-3 space-y-2.5">
-        {pros.map((p) => (
-          <li
-            key={p.name}
-            className="rounded-2xl border border-ink/10 bg-bone p-4"
-          >
-            <div className="flex items-start justify-between gap-2">
-              <div>
-                <h3 className="font-serif text-[17px] font-medium text-ink">
-                  {p.name}
-                </h3>
-                <p className="mt-0.5 text-[13px] text-ink/60">{p.address}</p>
-              </div>
-              <span
-                className={`shrink-0 rounded-full px-2 py-0.5 font-sans text-[11px] font-medium ${
-                  p.open
-                    ? "bg-sage/15 text-sage"
-                    : "bg-ash/15 text-ash"
-                }`}
+      {pros.length === 0 ? (
+        <p className="mt-3 rounded-2xl border border-ink/10 bg-bone p-4 text-[13.5px] leading-relaxed text-ink/65">
+          We couldn&apos;t fetch local repairers right now. Try a Google
+          Maps search with your appliance and city.
+        </p>
+      ) : (
+        <ul className="mt-3 space-y-2.5">
+          {pros.map((p, i) => {
+            const inner = (
+              <>
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <h3 className="font-serif text-[17px] font-medium text-ink">
+                      {p.name || "Repair shop"}
+                    </h3>
+                    {p.address && (
+                      <p className="mt-0.5 text-[13px] text-ink/60">
+                        {p.address}
+                      </p>
+                    )}
+                  </div>
+                  {p.open_now !== null && p.open_now !== undefined && (
+                    <span
+                      className={`shrink-0 rounded-full px-2 py-0.5 font-sans text-[11px] font-medium ${
+                        p.open_now
+                          ? "bg-sage/15 text-sage"
+                          : "bg-ash/15 text-ash"
+                      }`}
+                    >
+                      {p.open_now ? "Open now" : "Closed"}
+                    </span>
+                  )}
+                </div>
+                {p.rating !== null && p.rating !== undefined && (
+                  <div className="mt-2 flex items-center gap-2 font-sans text-[12.5px] text-ink/70">
+                    <span className="font-medium text-ink">★ {p.rating}</span>
+                    {p.reviews !== null && p.reviews !== undefined && (
+                      <>
+                        <span className="text-ash">·</span>
+                        <span>{p.reviews} reviews</span>
+                      </>
+                    )}
+                  </div>
+                )}
+              </>
+            );
+
+            return (
+              <li
+                key={`${p.name}-${i}`}
+                className="rounded-2xl border border-ink/10 bg-bone p-4 transition hover:border-goldseam/40"
               >
-                {p.open ? "Open now" : "Closed"}
-              </span>
-            </div>
-            <div className="mt-2 flex items-center gap-2 font-sans text-[12.5px] text-ink/70">
-              <span className="font-medium text-ink">★ {p.rating}</span>
-              <span className="text-ash">·</span>
-              <span>{p.reviews} reviews</span>
-            </div>
+                {p.google_maps_url ? (
+                  <a
+                    href={p.google_maps_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="block"
+                  >
+                    {inner}
+                  </a>
+                ) : (
+                  inner
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+
+      <SectionHeading
+        className="mt-6"
+        icon={<SparkIcon className="h-3.5 w-3.5" />}
+      >
+        Ask them this
+      </SectionHeading>
+      <ul className="mt-3 space-y-2 text-[13.5px] leading-relaxed text-ink/80">
+        {questions.map((q, i) => (
+          <li
+            key={i}
+            className="rounded-xl border border-ink/10 bg-bone px-3.5 py-2.5"
+          >
+            “{q}”
           </li>
         ))}
       </ul>
 
-      <SectionHeading className="mt-6" icon={<SparkIcon className="h-3.5 w-3.5" />}>
-        Ask them this
-      </SectionHeading>
-      <ul className="mt-3 space-y-2 text-[13.5px] leading-relaxed text-ink/80">
-        <li className="rounded-xl border border-ink/10 bg-bone px-3.5 py-2.5">
-          “Can you replace the drying element on a Bosch dishwasher?”
-        </li>
-        <li className="rounded-xl border border-ink/10 bg-bone px-3.5 py-2.5">
-          “Flat rate or hourly? Is the part included?”
-        </li>
-        <li className="rounded-xl border border-ink/10 bg-bone px-3.5 py-2.5">
-          “How long is the warranty on the repair?”
-        </li>
-      </ul>
+      {results?.advice && (
+        <p className="mt-4 rounded-xl border border-goldseam/30 bg-goldseam/5 px-3.5 py-2.5 text-[13px] leading-relaxed text-ink/80">
+          {results.advice}
+        </p>
+      )}
     </>
   );
 }
 
-function ReplaceContent() {
-  const items = [
-    {
-      brand: "Miele G 5000",
-      price: "€649",
-      tag: "Best value",
-      note: "10-yr expected lifespan, A-rated drying.",
-    },
-    {
-      brand: "Bosch Serie 4",
-      price: "€459",
-      tag: "Same brand",
-      note: "Familiar UI, easy parts replacement later.",
-    },
-    {
-      brand: "Refurb · Siemens iQ500",
-      price: "€289",
-      tag: "Refurbished",
-      note: "12-month warranty. Saves ~120 kg CO₂.",
-    },
-  ];
+function ReplaceContent({
+  alternatives,
+}: {
+  alternatives?: Alternatives | null;
+}) {
+  const models = alternatives?.recommended_models ?? [];
+  const links = alternatives?.search_links;
 
   return (
     <>
       <SectionHeading icon={<CheckIcon className="h-3.5 w-3.5" />}>
-        Three smart options
+        {models.length > 0
+          ? `${models.length} smart option${models.length > 1 ? "s" : ""}`
+          : "Smart options"}
       </SectionHeading>
-      <ul className="mt-3 space-y-2.5">
-        {items.map((it) => (
-          <li
-            key={it.brand}
-            className="rounded-2xl border border-ink/10 bg-bone p-4"
-          >
-            <div className="flex items-start justify-between gap-2">
-              <div>
-                <span className="rounded-full bg-goldseam/15 px-2 py-0.5 font-sans text-[10.5px] font-medium uppercase tracking-[0.1em] text-goldseam">
-                  {it.tag}
-                </span>
-                <h3 className="mt-1.5 font-serif text-[17px] font-medium text-ink">
-                  {it.brand}
-                </h3>
-                <p className="mt-0.5 text-[13px] leading-relaxed text-ink/65">
-                  {it.note}
-                </p>
+
+      {models.length === 0 ? (
+        <p className="mt-3 rounded-2xl border border-ink/10 bg-bone p-4 text-[13.5px] leading-relaxed text-ink/65">
+          {alternatives?.analysis ||
+            "Browse refurbished and new options on the marketplaces below."}
+        </p>
+      ) : (
+        <ul className="mt-3 space-y-2.5">
+          {models.map((m, i) => (
+            <li
+              key={`${m.brand}-${m.model}-${i}`}
+              className="rounded-2xl border border-ink/10 bg-bone p-4"
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex-1">
+                  <h3 className="font-serif text-[17px] font-medium text-ink">
+                    {[m.brand, m.model].filter(Boolean).join(" ")}
+                  </h3>
+                  {m.highlights && m.highlights.length > 0 && (
+                    <p className="mt-1 text-[13px] leading-relaxed text-ink/65">
+                      {m.highlights.join(" · ")}
+                    </p>
+                  )}
+                </div>
+                {m.estimated_price && (
+                  <span className="shrink-0 font-serif text-lg font-medium text-ink">
+                    {m.estimated_price}
+                  </span>
+                )}
               </div>
-              <span className="shrink-0 font-serif text-lg font-medium text-ink">
-                {it.price}
-              </span>
-            </div>
-          </li>
-        ))}
-      </ul>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {links && (
+        <>
+          <SectionHeading
+            className="mt-6"
+            icon={<SparkIcon className="h-3.5 w-3.5" />}
+          >
+            Search elsewhere
+          </SectionHeading>
+          <div className="mt-3 grid grid-cols-3 gap-2">
+            {([
+              ["Leboncoin", links.leboncoin],
+              ["Fnac", links.fnac],
+              ["Amazon", links.amazon],
+            ] as const)
+              .filter(([, url]) => !!url)
+              .map(([label, url]) => (
+                <a
+                  key={label}
+                  href={url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="rounded-2xl border border-ink/10 bg-bone px-3 py-2.5 text-center font-sans text-[12.5px] font-medium text-ink/80 transition hover:border-goldseam/40 hover:text-ink"
+                >
+                  {label}
+                </a>
+              ))}
+          </div>
+        </>
+      )}
     </>
   );
 }
