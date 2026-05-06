@@ -246,16 +246,15 @@ export default function DiagnosticApp() {
         if (cancelled) return;
         setIdentification(ident);
 
-        // 2) Diagnose — assemble the phase3 v3 payload (English keys).
+        // 2) Diagnose — let the backend chain Phase 2 (refine) → Phase 3
+        // (triage + agent). We pass the raw Phase 1 output and the user's
+        // context; the backend builds the Phase 2 input itself so we don't
+        // bypass the diagnosis-refinement step.
         const payload = {
-          appliance:
-            ident?.type?.replace(/_/g, " ") ||
-            (type ?? "").toLowerCase() ||
-            "appliance",
-          brand: ident?.brand ?? "",
-          year: AGE_TO_YEAR[age ?? ""] ?? "",
-          diagnosis:
-            text.trim() || (ident?.visible_symptoms ?? []).join(", "),
+          identification: ident,                              // Phase 1 dict or null
+          appliance_hint: type ?? "",                         // chip selection
+          free_text: text.trim(),                             // user's description
+          age: AGE_TO_YEAR[age ?? ""] || null,                // year string or null
           tools: tools.map((t) => t.toLowerCase()),
           location,
           budget: BUDGET_TO_VALUE[budget ?? ""] ?? 100,
@@ -831,6 +830,9 @@ function ResultScreen({
     "based on what you described";
   const confidence = identification?.confidence;
 
+  // Bottom CTA — adapts to what each agent actually returned.
+  const bottomCta = buildBottomCta(path, diagnosis, config);
+
   return (
     <section className="screen-enter flex min-h-dvh flex-col md:min-h-[calc(100dvh-3rem)]">
       <AppHeader showBack onBack={onReset} />
@@ -897,7 +899,7 @@ function ResultScreen({
         </div>
       </div>
 
-      {/* Bottom CTAs */}
+      {/* Bottom CTAs — primary opens whatever the agent gave us */}
       <div className="fixed inset-x-0 bottom-0 z-10 flex items-center gap-2 border-t border-ink/10 bg-bone/95 px-5 pt-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))] backdrop-blur md:absolute md:rounded-b-[2.6rem]">
         <button
           type="button"
@@ -907,15 +909,65 @@ function ResultScreen({
         >
           <RefreshIcon className="h-4 w-4" />
         </button>
-        <button
-          type="button"
-          className={`flex flex-1 items-center justify-center gap-2 rounded-full px-6 py-4 text-[15px] font-medium transition active:scale-[0.99] ${config.ctaClass}`}
-        >
-          {config.cta}
-        </button>
+        {bottomCta.href ? (
+          <a
+            href={bottomCta.href}
+            target="_blank"
+            rel="noopener noreferrer"
+            className={`flex flex-1 items-center justify-center gap-2 rounded-full px-6 py-4 text-[15px] font-medium transition active:scale-[0.99] ${config.ctaClass}`}
+          >
+            {bottomCta.label}
+            <span aria-hidden>↗</span>
+          </a>
+        ) : (
+          <button
+            type="button"
+            disabled
+            className={`flex flex-1 items-center justify-center gap-2 rounded-full px-6 py-4 text-[15px] font-medium opacity-60 ${config.ctaClass}`}
+          >
+            {bottomCta.label}
+          </button>
+        )}
       </div>
     </section>
   );
+}
+
+/**
+ * Pick the best bottom-CTA based on what each agent returned. The agents
+ * are the source of truth — we don't synthesize URLs out of thin air.
+ */
+function buildBottomCta(
+  path: Path,
+  diagnosis: Diagnosis | null,
+  config: { cta: string }
+): { label: string; href: string | null } {
+  if (path === "pro") {
+    const query = diagnosis?.solution?.results?.query_used;
+    if (query) {
+      return {
+        label: "Open in Google Maps",
+        href: `https://www.google.com/maps/search/${encodeURIComponent(query)}`,
+      };
+    }
+  }
+  if (path === "replace") {
+    const links = diagnosis?.solution?.alternatives?.search_links;
+    if (links?.leboncoin) {
+      return { label: "Browse Leboncoin", href: links.leboncoin };
+    }
+    if (links?.fnac) {
+      return { label: "Browse Fnac", href: links.fnac };
+    }
+  }
+  if (path === "diy") {
+    const sources = diagnosis?.solution?.guide?.sources ?? [];
+    const firstUrl = sources.find((s) => /^https?:\/\//i.test(s));
+    if (firstUrl) {
+      return { label: "Open the guide source", href: firstUrl };
+    }
+  }
+  return { label: config.cta, href: null };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -953,18 +1005,44 @@ function DiyContent({ guide }: { guide?: DiyGuide | null }) {
         }))
       : FALLBACK_DIY_STEPS;
 
-  const tools =
+  const toolsNeeded =
     guide?.tools_needed && guide.tools_needed.length > 0
       ? guide.tools_needed
       : FALLBACK_DIY_TOOLS;
 
+  const partsNeeded = guide?.parts_needed ?? [];
   const tips = guide?.tips ?? [];
+  const sources = guide?.sources ?? [];
 
   return (
     <>
+      {/* Guide header — title + difficulty + duration as meta row */}
+      {(guide?.title ||
+        guide?.difficulty ||
+        guide?.estimated_duration) && (
+        <div className="mb-4 rounded-2xl border border-ink/10 bg-bone p-4">
+          {guide?.title && (
+            <h2 className="font-serif text-[18px] font-medium leading-snug text-ink">
+              {guide.title}
+            </h2>
+          )}
+          <div className="mt-2 flex flex-wrap gap-2 font-sans text-[11px]">
+            {guide?.difficulty && (
+              <span className="rounded-full border border-goldseam/30 bg-goldseam/10 px-2.5 py-0.5 font-medium uppercase tracking-[0.1em] text-goldseam">
+                {guide.difficulty}
+              </span>
+            )}
+            {guide?.estimated_duration && (
+              <span className="rounded-full border border-ink/15 bg-bone px-2.5 py-0.5 font-medium text-ink/70">
+                {guide.estimated_duration}
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+
       <SectionHeading icon={<WrenchIcon className="h-3.5 w-3.5" />}>
-        {guide?.title ? guide.title : `Repair guide · ${steps.length} steps`}
-        {guide?.estimated_duration ? ` · ${guide.estimated_duration}` : ""}
+        {`${steps.length} step${steps.length > 1 ? "s" : ""}`}
       </SectionHeading>
       <ol className="mt-3 space-y-2.5">
         {steps.map((s) => (
@@ -994,19 +1072,43 @@ function DiyContent({ guide }: { guide?: DiyGuide | null }) {
         ))}
       </ol>
 
-      <SectionHeading className="mt-6" icon={<CheckIcon className="h-3.5 w-3.5" />}>
-        What you&apos;ll need
+      <SectionHeading
+        className="mt-6"
+        icon={<CheckIcon className="h-3.5 w-3.5" />}
+      >
+        Tools needed
       </SectionHeading>
       <div className="mt-3 flex flex-wrap gap-2 font-sans text-[12.5px]">
-        {tools.map((t) => (
+        {toolsNeeded.map((t, i) => (
           <span
-            key={t}
+            key={`${t}-${i}`}
             className="rounded-full border border-ink/15 bg-bone px-3 py-1.5 text-ink/80"
           >
             {t}
           </span>
         ))}
       </div>
+
+      {partsNeeded.length > 0 && (
+        <>
+          <SectionHeading
+            className="mt-6"
+            icon={<CheckIcon className="h-3.5 w-3.5" />}
+          >
+            Parts needed
+          </SectionHeading>
+          <ul className="mt-3 space-y-1.5">
+            {partsNeeded.map((p, i) => (
+              <li
+                key={`${p}-${i}`}
+                className="rounded-xl border border-ink/10 bg-bone px-3.5 py-2.5 font-sans text-[13px] text-ink/80"
+              >
+                {p}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
 
       {tips.length > 0 && (
         <>
@@ -1028,6 +1130,33 @@ function DiyContent({ guide }: { guide?: DiyGuide | null }) {
           </ul>
         </>
       )}
+
+      {sources.length > 0 && (
+        <>
+          <SectionHeading className="mt-6">Sources</SectionHeading>
+          <ul className="mt-2 space-y-1 font-sans text-[12px] text-ink/65">
+            {sources.map((s, i) => {
+              const isUrl = /^https?:\/\//i.test(s);
+              return (
+                <li key={i}>
+                  {isUrl ? (
+                    <a
+                      href={s}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="underline decoration-ink/20 underline-offset-2 hover:text-ink hover:decoration-goldseam"
+                    >
+                      {s}
+                    </a>
+                  ) : (
+                    <span>· {s}</span>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        </>
+      )}
     </>
   );
 }
@@ -1044,9 +1173,34 @@ function ProContent({ results }: { results?: RepairResults | null }) {
     results?.questions_to_ask && results.questions_to_ask.length > 0
       ? results.questions_to_ask
       : FALLBACK_QUESTIONS;
+  const skills = results?.required_skills ?? [];
+  const maxBudget = results?.max_budget;
 
   return (
     <>
+      {(skills.length > 0 || maxBudget) && (
+        <div className="mb-4 rounded-2xl border border-ink/10 bg-bone p-4">
+          {maxBudget && (
+            <p className="font-sans text-[12.5px] text-ink/70">
+              <span className="font-medium text-ink">Reasonable budget · </span>
+              {maxBudget}
+            </p>
+          )}
+          {skills.length > 0 && (
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {skills.map((s, i) => (
+                <span
+                  key={i}
+                  className="rounded-full border border-ink/15 bg-bone px-2.5 py-0.5 font-sans text-[11px] text-ink/70"
+                >
+                  {s}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       <SectionHeading icon={<PinIcon className="h-3.5 w-3.5" />}>
         {pros.length > 0
           ? `${pros.length} pro${pros.length > 1 ? "s" : ""} near you`
@@ -1155,9 +1309,38 @@ function ReplaceContent({
 }) {
   const models = alternatives?.recommended_models ?? [];
   const links = alternatives?.search_links;
+  const criteria = alternatives?.criteria ?? [];
+  const buyingTips = alternatives?.buying_tips ?? [];
 
   return (
     <>
+      {alternatives?.analysis && (
+        <p className="mb-4 rounded-2xl border border-ink/10 bg-bone p-4 text-[13.5px] leading-relaxed text-ink/75">
+          {alternatives.analysis}
+        </p>
+      )}
+
+      {criteria.length > 0 && (
+        <>
+          <SectionHeading
+            className="mb-2"
+            icon={<CheckIcon className="h-3.5 w-3.5" />}
+          >
+            What matters here
+          </SectionHeading>
+          <div className="mb-5 flex flex-wrap gap-1.5">
+            {criteria.map((c, i) => (
+              <span
+                key={i}
+                className="rounded-full border border-ink/15 bg-bone px-2.5 py-0.5 font-sans text-[11.5px] text-ink/70"
+              >
+                {c}
+              </span>
+            ))}
+          </div>
+        </>
+      )}
+
       <SectionHeading icon={<CheckIcon className="h-3.5 w-3.5" />}>
         {models.length > 0
           ? `${models.length} smart option${models.length > 1 ? "s" : ""}`
@@ -1166,36 +1349,90 @@ function ReplaceContent({
 
       {models.length === 0 ? (
         <p className="mt-3 rounded-2xl border border-ink/10 bg-bone p-4 text-[13.5px] leading-relaxed text-ink/65">
-          {alternatives?.analysis ||
-            "Browse refurbished and new options on the marketplaces below."}
+          Browse refurbished and new options on the marketplaces below.
         </p>
       ) : (
         <ul className="mt-3 space-y-2.5">
-          {models.map((m, i) => (
-            <li
-              key={`${m.brand}-${m.model}-${i}`}
-              className="rounded-2xl border border-ink/10 bg-bone p-4"
-            >
-              <div className="flex items-start justify-between gap-2">
-                <div className="flex-1">
-                  <h3 className="font-serif text-[17px] font-medium text-ink">
-                    {[m.brand, m.model].filter(Boolean).join(" ")}
-                  </h3>
-                  {m.highlights && m.highlights.length > 0 && (
-                    <p className="mt-1 text-[13px] leading-relaxed text-ink/65">
-                      {m.highlights.join(" · ")}
-                    </p>
+          {models.map((m, i) => {
+            const lbcUrl = m.leboncoin_query
+              ? `https://www.leboncoin.fr/recherche?text=${encodeURIComponent(m.leboncoin_query)}`
+              : undefined;
+            const amazonUrl = m.amazon_query
+              ? `https://www.amazon.fr/s?k=${encodeURIComponent(m.amazon_query)}`
+              : undefined;
+
+            return (
+              <li
+                key={`${m.brand}-${m.model}-${i}`}
+                className="rounded-2xl border border-ink/10 bg-bone p-4"
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex-1">
+                    <h3 className="font-serif text-[17px] font-medium text-ink">
+                      {[m.brand, m.model].filter(Boolean).join(" ")}
+                    </h3>
+                    {m.highlights && m.highlights.length > 0 && (
+                      <p className="mt-1 text-[13px] leading-relaxed text-ink/65">
+                        {m.highlights.join(" · ")}
+                      </p>
+                    )}
+                  </div>
+                  {m.estimated_price && (
+                    <span className="shrink-0 font-serif text-lg font-medium text-ink">
+                      {m.estimated_price}
+                    </span>
                   )}
                 </div>
-                {m.estimated_price && (
-                  <span className="shrink-0 font-serif text-lg font-medium text-ink">
-                    {m.estimated_price}
-                  </span>
+
+                {(lbcUrl || amazonUrl) && (
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {lbcUrl && (
+                      <a
+                        href={lbcUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="rounded-full border border-ink/15 bg-bone px-3 py-1.5 font-sans text-[12px] font-medium text-ink/80 transition hover:border-goldseam/40 hover:text-ink"
+                      >
+                        Find used →
+                      </a>
+                    )}
+                    {amazonUrl && (
+                      <a
+                        href={amazonUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="rounded-full border border-ink/15 bg-bone px-3 py-1.5 font-sans text-[12px] font-medium text-ink/80 transition hover:border-goldseam/40 hover:text-ink"
+                      >
+                        Buy new →
+                      </a>
+                    )}
+                  </div>
                 )}
-              </div>
-            </li>
-          ))}
+              </li>
+            );
+          })}
         </ul>
+      )}
+
+      {buyingTips.length > 0 && (
+        <>
+          <SectionHeading
+            className="mt-6"
+            icon={<SparkIcon className="h-3.5 w-3.5" />}
+          >
+            Buying tips
+          </SectionHeading>
+          <ul className="mt-3 space-y-2 text-[13.5px] leading-relaxed text-ink/80">
+            {buyingTips.map((t, i) => (
+              <li
+                key={i}
+                className="rounded-xl border border-ink/10 bg-bone px-3.5 py-2.5"
+              >
+                {t}
+              </li>
+            ))}
+          </ul>
+        </>
       )}
 
       {links && (
@@ -1204,7 +1441,7 @@ function ReplaceContent({
             className="mt-6"
             icon={<SparkIcon className="h-3.5 w-3.5" />}
           >
-            Search elsewhere
+            Browse marketplaces
           </SectionHeading>
           <div className="mt-3 grid grid-cols-3 gap-2">
             {([

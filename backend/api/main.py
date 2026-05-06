@@ -62,6 +62,7 @@ _ENV_LOADED_FROM = _load_env()
 # Now safe to import modules that read env at module-load time
 import httpx                              # noqa: E402
 import object_identification as oi       # noqa: E402
+import phase2                             # noqa: E402
 import phase3                             # noqa: E402
 
 GOOGLE_PLACES_API_KEY = os.getenv("GOOGLE_PLACES_API_KEY", "").strip()
@@ -142,11 +143,16 @@ async def identify(
 #  /api/diagnose
 # ---------------------------------------------------------------------------
 class DiagnoseRequest(BaseModel):
-    """Mirrors the input expected by phase3 v3 (English keys)."""
-    appliance: str = ""
-    brand: str = ""
-    year: str = ""
-    diagnosis: str = ""
+    """Full pipeline input — runs Phase 2 → Phase 3 server-side.
+
+    `identification` is the Phase 1 output (from /api/identify) when photos
+    were uploaded. When absent, we synthesise a minimal Phase-1-shaped dict
+    from `appliance_hint` + `free_text` so Phase 2 can still run.
+    """
+    identification: Optional[dict[str, Any]] = None
+    appliance_hint: str = ""
+    free_text: str = ""
+    age: Optional[str] = None
     tools: list[str] = Field(default_factory=list)
     location: str = ""
     budget: int = 0
@@ -154,11 +160,60 @@ class DiagnoseRequest(BaseModel):
 
 @app.post("/api/diagnose")
 def diagnose(req: DiagnoseRequest) -> dict[str, Any]:
-    """Run phase3.run_phase3(); optionally override repair shops with Places v2."""
+    """Phase 2 (refine diagnosis) → Phase 3 (triage + path agent).
+
+    Phase 1 is run separately by /api/identify; its output is passed back as
+    `identification` so we don't double-call the vision model.
+    """
+    # ----- Build the Phase 1-shaped dict that Phase 2 expects ------------
+    if req.identification:
+        phase1 = dict(req.identification)
+        # Append the user's free text as another visible symptom — it's
+        # context the model didn't see in the photos.
+        if req.free_text.strip():
+            phase1.setdefault("visible_symptoms", []).append(req.free_text.strip())
+    else:
+        phase1 = {
+            "type": (req.appliance_hint or "other").lower().replace(" ", "_"),
+            "brand": None,
+            "model": None,
+            "serial": None,
+            "error_code": None,
+            "visible_symptoms": [req.free_text] if req.free_text.strip() else [],
+            "confidence": 0.5,
+        }
+
+    if not phase1.get("visible_symptoms"):
+        raise HTTPException(
+            status_code=400,
+            detail="No symptoms to diagnose. Upload photos or describe the problem.",
+        )
+
+    # ----- Phase 2: refine diagnosis -------------------------------------
     try:
-        result = phase3.run_phase3(req.model_dump())
+        phase2_result = phase2.run_phase2(phase1)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"phase2 error: {exc}")
+
+    # The user knows the appliance's age better than the model can guess it.
+    if req.age:
+        phase2_result["year"] = req.age
+
+    # ----- Phase 3: triage + solution ------------------------------------
+    phase3_input = {
+        **phase2_result,
+        "tools": req.tools,
+        "location": req.location,
+        "budget": req.budget,
+    }
+
+    try:
+        result = phase3.run_phase3(phase3_input)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"phase3 error: {exc}")
+
+    # Surface intermediate steps so the frontend can display them if useful.
+    result["phase2"] = phase2_result
 
     # Override Google Maps legacy results with Places API (New) when available.
     solution = result.get("solution", {})
