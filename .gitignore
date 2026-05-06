@@ -8,7 +8,3 @@ image.png
 .env
 .env.local
 .env.*.local
-.env
-
-
-TEST/

@@ -41,7 +41,7 @@ _JSON_SCHEMA = """{
 PROMPT = f"""Identify this appliance from the photos.
 Strategy:
 1. Read any visible text (brand, model, serial, error codes) from the photos.
-2. Call lookup_product with the brand + model (or a visual description if no model is visible) to retrieve real product specs and confirm your reading.
+2. Call lookup_product with the brand + model (or a visual description if no model is visible) to retrieve real product specs and confirm your reading. If location or purchase year are provided, include them in the query to target the right market and generation.
 3. Once you have a brand and candidate model, call verify_model to confirm the model exists on the manufacturer's official website. If it doesn't exist, adjust the model number and try again.
 4. Once confirmed, reply with JSON only — no other text:
 {_JSON_SCHEMA}
@@ -156,12 +156,17 @@ def _parse_json(text):
     return json.loads(text.strip("` \njson"))
 
 
-def identify(photo_paths, hints=None):
-    """Agentic identification: model analyses photos and may call search_images
-    to cross-check its guess. Returns the parsed result dict."""
+def identify(photo_paths, hints=None, location=None, year=None):
+    """Agentic identification: model analyses photos and may call lookup_product
+    and verify_model to cross-check its guess. Returns the parsed result dict."""
     text = PROMPT
-    if hints:
-        text += "\n\nUser context:\n" + "\n".join(f"- {h}" for h in hints)
+    context = list(hints or [])
+    if location:
+        context.append(f"The appliance is located in / was sold in: {location}")
+    if year:
+        context.append(f"Approximate purchase year: {year}")
+    if context:
+        text += "\n\nUser context:\n" + "\n".join(f"- {c}" for c in context)
 
     image_blocks = [
         {"type": "image_url", "image_url": {"url": encode_image(p)}}
