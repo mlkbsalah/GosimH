@@ -3,3 +3,8 @@ api_key.txt
 __pycache__/
 test.py
 image.png
+
+# Secrets — never commit
+.env
+.env.local
+.env.*.local
